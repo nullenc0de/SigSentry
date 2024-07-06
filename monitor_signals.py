@@ -176,7 +176,10 @@ def wifi_sniff(packet):
         if packet.type == 0 and packet.subtype == 8:  # Beacon frame
             ssid = packet.info.decode(errors='replace')
             bssid = packet.addr2
-            signal_strength = -(256-ord(packet.notdecoded[-4:-3]))  # Extract signal strength
+            if len(packet.notdecoded) >= 4:
+                signal_strength = -(256-ord(packet.notdecoded[-4:-3]))  # Extract signal strength
+            else:
+                signal_strength = None
             timestamp = datetime.now()
             signal_queue.put(('wifi', ssid, bssid, signal_strength, timestamp))
 
@@ -317,15 +320,69 @@ def generate_daily_report():
             send_webhook({'event': 'daily_report', 'report': report})
             print(f"Daily report sent. New devices: {len(new_devices)}, Active devices: {len(active_devices)}")
 
-def get_wifi_interface():
+def get_wifi_interfaces():
     try:
         result = subprocess.run(['iwconfig'], capture_output=True, text=True)
         interfaces = [line.split()[0] for line in result.stdout.split('\n') if 'IEEE 802.11' in line]
-        if interfaces:
-            return interfaces[0]
+        return interfaces
     except Exception as e:
-        print(f"Error detecting Wi-Fi interface: {e}")
-    return None
+        print(f"Error detecting Wi-Fi interfaces: {e}")
+    return []
+
+def select_wifi_interface():
+    interfaces = get_wifi_interfaces()
+    if not interfaces:
+        print("No Wi-Fi interfaces detected. Please ensure your Wi-Fi adapter is connected and recognized by the system.")
+        sys.exit(1)
+
+    if len(interfaces) == 1:
+        print(f"Only one Wi-Fi interface detected: {interfaces[0]}")
+        return interfaces[0]
+
+    print("Multiple Wi-Fi interfaces detected. Please choose one:")
+    for i, interface in enumerate(interfaces, 1):
+        print(f"{i}. {interface}")
+
+    while True:
+        try:
+            choice = int(input("Enter the number of the interface you want to use: "))
+            if 1 <= choice <= len(interfaces):
+                return interfaces[choice - 1]
+            else:
+                print("Invalid choice. Please try again.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+
+def put_interface_in_monitor_mode(interface):
+    try:
+        print(f"Attempting to put {interface} into monitor mode...")
+        subprocess.run(['sudo', 'airmon-ng', 'check', 'kill'], check=True)
+        result = subprocess.run(['sudo', 'airmon-ng', 'start', interface], capture_output=True, text=True, check=True)
+        print(result.stdout)
+        # Check if the interface name changed
+        new_interfaces = get_wifi_interfaces()
+        monitor_interfaces = [iface for iface in new_interfaces if iface.startswith(interface) or iface.endswith('mon')]
+
+        if monitor_interfaces:
+            monitor_interface = monitor_interfaces[0]
+            # Bring the interface up
+            subprocess.run(['sudo', 'ip', 'link', 'set', monitor_interface, 'up'], check=True)
+            print(f"Brought {monitor_interface} up")
+            return monitor_interface
+        else:
+            print("Failed to find monitor mode interface after airmon-ng")
+            return None
+    except subprocess.CalledProcessError as e:
+        print(f"Error putting interface into monitor mode: {e}")
+        print("Output:", e.output)
+        return None
+
+def check_interface_up(interface):
+    try:
+        result = subprocess.run(['ip', 'link', 'show', interface], capture_output=True, text=True, check=True)
+        return 'UP' in result.stdout
+    except subprocess.CalledProcessError:
+        return False
 
 def main():
     global conn, c, signal_queue, lock
@@ -343,16 +400,34 @@ def main():
     signal_queue = Queue()
     lock = threading.Lock()
 
-    # Check for Wi-Fi interface
-    wifi_interface = get_wifi_interface()
-    if not wifi_interface:
-        wifi_interface = input("Wi-Fi interface not detected. Please enter the name of your Wi-Fi interface: ")
+    # Let user select Wi-Fi interface
+    wifi_interface = select_wifi_interface()
+    print(f"Selected Wi-Fi interface: {wifi_interface}")
 
-    print(f"Using Wi-Fi interface: {wifi_interface}")
+    # Put interface into monitor mode
+    monitor_interface = put_interface_in_monitor_mode(wifi_interface)
+    if not monitor_interface:
+        print("Failed to put Wi-Fi interface into monitor mode. Please check your permissions and try again.")
+        sys.exit(1)
+
+    print(f"Wi-Fi interface {monitor_interface} is now in monitor mode")
+
+    # Check if interface is up
+    if not check_interface_up(monitor_interface):
+        print(f"Interface {monitor_interface} is down. Attempting to bring it up...")
+        try:
+            subprocess.run(['sudo', 'ip', 'link', 'set', monitor_interface, 'up'], check=True)
+            print(f"Brought {monitor_interface} up")
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to bring {monitor_interface} up: {e}")
+            sys.exit(1)
 
     print("Starting Wi-Fi Sniffing...")
-    wifi_thread = threading.Thread(target=lambda: scapy.sniff(iface=wifi_interface, prn=wifi_sniff, store=0))
-    wifi_thread.start()
+    try:
+        wifi_thread = threading.Thread(target=lambda: scapy.sniff(iface=monitor_interface, prn=wifi_sniff, store=0))
+        wifi_thread.start()
+    except Exception as e:
+        print(f"Error starting Wi-Fi sniffing: {e}")
 
     print("Starting Bluetooth Sniffing...")
     bt_thread = threading.Thread(target=bt_sniff)
@@ -385,7 +460,15 @@ def main():
         print("\nStopping threads...")
     finally:
         conn.close()
-        print("Database connection closed. Exiting.")
+        print("Database connection closed.")
+        # Attempt to restore Wi-Fi interface to managed mode
+        try:
+            subprocess.run(['sudo', 'airmon-ng', 'stop', monitor_interface], check=True)
+            subprocess.run(['sudo', 'systemctl', 'restart', 'NetworkManager'], check=True)
+            print(f"Restored {wifi_interface} to managed mode. Network services restarted.")
+        except subprocess.CalledProcessError as e:
+            print(f"Error restoring Wi-Fi interface: {e}")
+        print("Exiting.")
 
 if __name__ == "__main__":
     main()
