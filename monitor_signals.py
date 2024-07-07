@@ -28,6 +28,8 @@ class Config:
     DB_CLEANUP_INTERVAL = 86400  # Run database cleanup once a day (in seconds)
     REPORT_INTERVAL = 86400  # Generate report once a day (in seconds)
     SIGNAL_THRESHOLD = -70  # Only report signals stronger than this (adjust as needed)
+    WIGLE_UPLOAD_INTERVAL = 3600  # Upload data to Wigle once an hour (in seconds)
+    WIGLE_API_KEY = os.getenv('WIGLE_API_KEY', '')  # Wigle API key from environment
 
     @classmethod
     def load_from_file(cls):
@@ -144,6 +146,17 @@ def send_webhook(data):
         print(f"Webhook response: {response.status_code}")
     except requests.RequestException as e:
         print(f"Webhook error: {e}")
+
+def send_to_wigle(data):
+    if Config.WIGLE_API_KEY:
+        try:
+            headers = {'Authorization': f'Basic {Config.WIGLE_API_KEY}'}
+            response = requests.post('https://api.wigle.net/api/v2/network/upload', files={'file': json.dumps(data)}, headers=headers)
+            print(f"Wigle response: {response.status_code}")
+        except requests.RequestException as e:
+            print(f"Wigle error: {e}")
+    else:
+        print("Wigle API key not set. Skipping Wigle upload.")
 
 def generate_device_id(wifi_data, bt_data):
     if wifi_data and bt_data:
@@ -320,6 +333,24 @@ def generate_daily_report():
             send_webhook({'event': 'daily_report', 'report': report})
             print(f"Daily report sent. New devices: {len(new_devices)}, Active devices: {len(active_devices)}")
 
+def upload_to_wigle():
+    while True:
+        time.sleep(Config.WIGLE_UPLOAD_INTERVAL)
+
+        with conn:
+            wifi_signals = c.execute("SELECT * FROM wifi_signals WHERE timestamp > ?", 
+                                     (datetime.now() - timedelta(seconds=Config.WIGLE_UPLOAD_INTERVAL),)).fetchall()
+            bt_signals = c.execute("SELECT * FROM bluetooth_signals WHERE timestamp > ?", 
+                                   (datetime.now() - timedelta(seconds=Config.WIGLE_UPLOAD_INTERVAL),)).fetchall()
+
+            data = {
+                'wifi_signals': wifi_signals,
+                'bluetooth_signals': bt_signals
+            }
+
+            send_to_wigle(data)
+            print(f"Uploaded {len(wifi_signals)} Wi-Fi signals and {len(bt_signals)} Bluetooth signals to Wigle.")
+
 def get_wifi_interfaces():
     try:
         result = subprocess.run(['iwconfig'], capture_output=True, text=True)
@@ -449,6 +480,10 @@ def main():
     report_thread = threading.Thread(target=generate_daily_report)
     report_thread.start()
 
+    print("Starting Wigle upload...")
+    wigle_thread = threading.Thread(target=upload_to_wigle)
+    wigle_thread.start()
+
     try:
         wifi_thread.join()
         bt_thread.join()
@@ -456,6 +491,7 @@ def main():
         cleanup_thread.join()
         db_cleanup_thread.join()
         report_thread.join()
+        wigle_thread.join()
     except KeyboardInterrupt:
         print("\nStopping threads...")
     finally:
