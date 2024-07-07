@@ -196,18 +196,26 @@ def wifi_sniff(packet):
             timestamp = datetime.now()
             signal_queue.put(('wifi', ssid, bssid, signal_strength, timestamp))
 
+class ScanDelegate(btle.DefaultDelegate):
+    def __init__(self):
+        btle.DefaultDelegate.__init__(self)
+
+    def handleDiscovery(self, dev, isNewDev, isNewData):
+        if isNewDev or isNewData:
+            adv_data = {}
+            for (adtype, desc, value) in dev.getScanData():
+                adv_data[desc] = value
+            name = adv_data.get('Complete Local Name') or adv_data.get('Short Local Name') or "Unknown"
+            addr = dev.addr
+            rssi = dev.rssi
+            timestamp = datetime.now()
+            signal_queue.put(('bluetooth', name, addr, rssi, adv_data, timestamp))
+
 def bt_sniff():
-    scanner = btle.Scanner()
+    scanner = btle.Scanner().withDelegate(ScanDelegate())
     while True:
         try:
-            devices = scanner.scan(10.0)  # Scan for 10 seconds
-            for dev in devices:
-                name = dev.getValueText(9) or "Unknown"
-                addr = dev.addr
-                rssi = dev.rssi
-                adv_data = dev.getValueText(255) or ""
-                timestamp = datetime.now()
-                signal_queue.put(('bluetooth', name, addr, rssi, adv_data, timestamp))
+            scanner.scan(10.0)  # Scan for 10 seconds
         except btle.BTLEException as e:
             print(f"Bluetooth error: {e}")
         time.sleep(Config.BT_SCAN_INTERVAL)
@@ -249,9 +257,10 @@ def process_signals():
                         print(f"Wi-Fi Signal: SSID: {ssid}, BSSID: {bssid}, Strength: {signal_strength}, Timestamp: {timestamp}")
                     else:  # Bluetooth
                         _, name, addr, rssi, adv_data, timestamp = signal
+                        adv_data_str = json.dumps(adv_data)
                         c.execute("INSERT INTO bluetooth_signals (address, name, rssi, adv_data, timestamp) VALUES (?, ?, ?, ?, ?)",
-                                  (addr, name, rssi, adv_data, timestamp))
-                        print(f"Bluetooth Signal: Address: {addr}, Name: {name}, RSSI: {rssi}, Data: {adv_data}, Timestamp: {timestamp}")
+                                  (addr, name, rssi, adv_data_str, timestamp))
+                        print(f"Bluetooth Signal: Address: {addr}, Name: {name}, RSSI: {rssi}, Data: {adv_data_str}, Timestamp: {timestamp}")
 
             for device in associated_devices:
                 update_device(wifi_data=device['wifi'], bt_data=device['bluetooth'])
