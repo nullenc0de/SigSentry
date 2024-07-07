@@ -17,6 +17,7 @@ SigSentry is a powerful, open-source tool designed for comprehensive monitoring 
 - Python 3.7+
 - Raspberry Pi or Linux-based system with Wi-Fi and Bluetooth capabilities
 - Root/sudo privileges
+- External wifi card (I'm using Ralink Technology, Corp. RT2770)
 
 ## Installation
 
